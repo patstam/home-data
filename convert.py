@@ -1,5 +1,7 @@
+import boto3
 import collections
 import csv
+import json
 import os
 import sys
 import tempfile
@@ -67,7 +69,7 @@ def get_data_range_dates(data):
     last_date = last.split()[0].replace('-', '')
     return (first_date, last_date)
 
-def convert_files(files):
+def convert_files(files, outdir):
     pse_data = collections.defaultdict(list)
     govee_data = collections.defaultdict(list)
 
@@ -97,7 +99,7 @@ def convert_files(files):
         data = pse_data[usage_type]
         first_date, last_date = get_data_range_dates(data)
 
-        with open(f"{type_name}_{first_date}_{last_date}.csv", 'w') as of:
+        with open(os.path.join(outdir, f"{type_name}_{first_date}_{last_date}.csv"), 'w') as of:
             csv_writer = csv.writer(of)
             csv_writer.writerow(["start", "end", f"usage_{units}"])
 
@@ -109,12 +111,70 @@ def convert_files(files):
         data = govee_data[sensor]
         first_date, last_date = get_data_range_dates(data)
 
-        with open(f"{sensor}_{first_date}_{last_date}.csv", 'w') as of:
+        with open(os.path.join(outdir, f"{sensor}_{first_date}_{last_date}.csv"), 'w') as of:
             csv_writer = csv.writer(of)
             csv_writer.writerow(["timestamp", "temp_degf", "relative_humidity"])
 
             for row in data:
                 csv_writer.writerow(row)
 
+def lambda_handler(event, context):
+    bucket = event['Records'][0]['s3']['bucket']['name']
+    key = event['Records'][0]['s3']['object']['key']
+    outbucket = os.environ['OUTPUT_BUCKET']
+
+    s3 = boto3.client('s3')
+
+    with tempfile.TemporaryDirectory() as indir:
+        local_path = os.path.join(indir, os.path.basename(key))
+
+        try:
+            # Download the file
+            s3.download_file(bucket, key, local_path)
+
+            outkey = None
+            with tempfile.TemporaryDirectory() as outdir:
+                convert_files([local_path], outdir)
+                for file in os.listdir(outdir):
+                    if not file.endswith(".csv"):
+                        continue
+
+                    s3.upload_file(os.path.join(outdir, file), outbucket, file)
+                    outkey = file
+                    break
+
+            # Clean up the file we just processed
+            s3.delete_object(Bucket=bucket, Key=key)
+
+            return {
+                'statusCode': 200,
+                'body': json.dumps({
+                    'bucket': outbucket,
+                    'key': outkey,
+                }),
+            }
+        except Exception as e:
+            return {
+                'statusCode': 500,
+                'body': json.dumps({
+                    'error': f"{e}",
+                }),
+            }
+
 if __name__ == "__main__":
-    convert_files(sys.argv[1:])
+    if sys.argv[1] == 'aws':
+        event = {
+            'Records': [
+                {
+                    's3': {
+                        'bucket': { 'name': 'patstam-home-data-input' },
+                        'object': { 'key': 'Master_export202412260840.csv' }
+                    }
+                }
+            ]
+        }
+        os.environ['OUTPUT_BUCKET'] = 'patstam-home-data-output'
+        print(json.dumps(lambda_handler(event, {})))
+    else:
+        convert_files(sys.argv[1:], ".")
+
