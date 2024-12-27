@@ -132,7 +132,7 @@ def lambda_handler(event, context):
             # Download the file
             s3.download_file(bucket, key, local_path)
 
-            outkey = None
+            outkeys = []
             with tempfile.TemporaryDirectory() as outdir:
                 convert_files([local_path], outdir)
                 for file in os.listdir(outdir):
@@ -140,8 +140,7 @@ def lambda_handler(event, context):
                         continue
 
                     s3.upload_file(os.path.join(outdir, file), outbucket, file)
-                    outkey = file
-                    break
+                    outkeys.append(file)
 
             # Clean up the file we just processed
             s3.delete_object(Bucket=bucket, Key=key)
@@ -150,7 +149,7 @@ def lambda_handler(event, context):
                 'statusCode': 200,
                 'body': json.dumps({
                     'bucket': outbucket,
-                    'key': outkey,
+                    'keys': outkeys,
                 }),
             }
         except Exception as e:
